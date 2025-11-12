@@ -1,0 +1,17 @@
+app:
+  name: "Zanella AI"
+  version: ${APP_VERSION:1.0.0}
+  log_level: ${APP_LOG_LEVEL:debug}
+  env: ${APP_ENV:production}
+
+
+# Google API configuration
+# - Provide either `google_service_account_file` (path to service account JSON file),
+# - or `google_service_account_json` (the full service account JSON object inline),
+# - or `google_api_key` (for public sheets / API-key based access).
+google:
+  api_key: ${GOOGLE_API_KEY:false}
+  service_account_file: ${GOOGLE_SERVICE_ACCOUNT_FILE:false}
+  scopes: 
+    - https://www.googleapis.com/auth/spreadsheets.readonly
+    - https://www.googleapis.com/auth/drive.readonly

@@ -1,0 +1,13 @@
+env: development
+app_name: zanella_project
+log_level: INFO
+
+# Google API configuration
+# - Provide either `google_service_account_file` (path to service account JSON file),
+# - or `google_service_account_json` (the full service account JSON object inline),
+# - or `google_api_key` (for public sheets / API-key based access).
+google_api_key: null
+google_service_account_file: null
+google_service_account_json: {}
+google_scopes:
+  - https://www.googleapis.com/auth/spreadsheets.readonly
