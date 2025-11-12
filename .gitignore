@@ -12,3 +12,4 @@ secrets/
 
 credentials.json
 token.json
+dev.settings.config.env
