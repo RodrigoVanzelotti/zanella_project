@@ -9,3 +9,6 @@ uv.lock
 # Ignore local copies of Google service account files
 config/google_service_account.json
 secrets/
+
+credentials.json
+token.json
