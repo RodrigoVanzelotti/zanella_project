@@ -1,7 +1,19 @@
 import pandas as pd
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Optional
 import unicodedata
 import re
+from .models import (
+    AssetAllocationData,
+    GeneralAllocation,
+    GeneralAllocationDetailRow,
+    GeneralAllocationSummaryRow,
+    StandardInvestmentTable,
+    StandardInvestmentRow,
+    InvestmentTotal,
+    RendaFixaBrasil,
+    RendaFixaBrasilBlock,
+    RendaFixaBrasilRow
+)
 
 class AssetAllocationParser:
     def __init__(self):
@@ -129,6 +141,63 @@ class AssetAllocationParser:
             return float(s) / 100.0
         except:
             return float("nan")
+        
+    def split_renda_fixa_brasil(self, df: pd.DataFrame) -> dict:
+        """
+        Divide o DataFrame de 'Renda Fixa Brasil' em blocos com base nos subtotais.
+        Retorna um dicionário estruturado com os blocos e seus totais.
+        """
+        df = df.copy().reset_index(drop=True)
+
+        # 1. Detectar linhas com "Total"
+        total_rows = []
+        for i, row in df.iterrows():
+            joined = " ".join(str(x) for x in row if str(x).strip() != "")
+            if re.search(r"\btotal\b", joined, flags=re.IGNORECASE):
+                total_rows.append((i, joined))
+
+        # 2. Identificar as labels (Curto, Médio, Longo, Total BR)
+        blocks = []
+        for idx, text in total_rows:
+            label = (
+                "Curto Prazo" if "curto" in text.lower()
+                else "Médio Prazo" if "medio" in text.lower() or "médio" in text.lower()
+                else "Longo Prazo" if "longo" in text.lower()
+                else "Total Renda Fixa BR" if "renda fixa" in text.lower()
+                else text
+            )
+            blocks.append((idx, label))
+
+        # 3. Montar blocos de dados entre subtotais
+        result = {}
+        for i, (idx, label) in enumerate(blocks):
+            # Total da seção atual
+            valor_total = None
+            if "valor_atual" in df.columns:
+                val = df.loc[idx, "valor_atual"]
+            else:
+                # tenta achar em qualquer coluna
+                val = next((v for v in df.loc[idx].values if "R$" in str(v)), "")
+            valor_total = self._convert_money(val)
+
+            # Pular o total geral (pois ele não tem seção de dados)
+            if "renda fixa" in label.lower():
+                result[label] = valor_total
+                continue
+
+            # Limites: entre o subtotal anterior e o atual
+            start = blocks[i - 1][0] + 1 if i > 0 else 0
+            end = idx
+            section_df = df.iloc[start:end].copy()
+            section_df = section_df[
+                ~section_df.apply(lambda r: any("Total" in str(v) for v in r.values), axis=1)
+            ]
+            result[label] = {
+                "df": section_df.reset_index(drop=True),
+                "total": valor_total
+            }
+
+        return result
 
     def parse_multiple_tables(self, raw_rows: List[List[Any]],
                             table_names: List[str] = None,
@@ -255,7 +324,187 @@ class AssetAllocationParser:
 
             result[wanted] = df_full.reset_index(drop=True)
 
+        # Processar Renda Fixa Brasil com lógica especial
+        if "Renda Fixa Brasil" in result and isinstance(result["Renda Fixa Brasil"], pd.DataFrame) and not result["Renda Fixa Brasil"].empty:
+            result["Renda Fixa Brasil"] = self.split_renda_fixa_brasil(result["Renda Fixa Brasil"])
+        
+        # Processar tabelas padrão de investimentos
+        standard_tables = ["Commodities", "Stocks US", "World Stocks", "Acões BR", "REITs", "FUNDOS IMOBILIÁRIOS"]
+        for table_name in standard_tables:
+            # Encontrar o bloco correspondente nos raw_rows diretamente (não usar result anterior)
+            norm_name = self._normalize_text(table_name)
+            for i, row in enumerate(raw_rows):
+                joined = " ".join(self._normalize_text(c) for c in row if self._normalize_text(c) != "")
+                
+                # Verificar se a linha contém o nome da tabela
+                if norm_name in joined:
+                    # IMPORTANTE: Verificar se a próxima linha (ou próximas 2-3 linhas) contém "ticker" e "qtd"
+                    # para garantir que é uma tabela de investimentos detalhada e não a categoria principal
+                    has_ticker_header = False
+                    for check_idx in range(i + 1, min(i + 4, len(raw_rows))):
+                        check_row_text = " ".join(str(c).lower() for c in raw_rows[check_idx])
+                        if "ticker" in check_row_text and "qtd" in check_row_text:
+                            has_ticker_header = True
+                            break
+                    
+                    # Se não tem cabeçalho com ticker/qtd, não é uma tabela de investimento detalhada
+                    if not has_ticker_header:
+                        continue
+                    
+                    # Encontrar o fim do bloco (próxima tabela ou fim)
+                    end_idx = len(raw_rows)
+                    for j in range(i + 1, len(raw_rows)):
+                        next_joined = " ".join(self._normalize_text(c) for c in raw_rows[j] if self._normalize_text(c) != "")
+                        # Verificar se é início de outra tabela
+                        is_next_table = any(self._normalize_text(other) in next_joined 
+                                          for other in self.subtable_names if other != table_name)
+                        if is_next_table:
+                            end_idx = j
+                            break
+                    
+                    # Extrair bloco e parsear
+                    block = raw_rows[i:end_idx]
+                    df_parsed, total_info = self.parse_standard_investment_table(block, table_name)
+                    result[table_name] = {
+                        "df": df_parsed,
+                        "total": total_info
+                    }
+                    break
+
         return result
+
+    def parse_standard_investment_table(self, raw_rows: List[List[Any]], table_name: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """
+        Parse tabelas padrão de investimentos que seguem a estrutura:
+        - Commodities, Stocks US, World Stocks, Ações BR, REITs, FUNDOS IMOBILIÁRIOS
+        
+        Estrutura esperada:
+        - Linha de título (ex: "Commodities")
+        - Linha de cabeçalho com colunas
+        - Linhas de dados (nome do ativo deslocado uma célula à esquerda)
+        - Linha de total (começa com "Total...")
+        
+        Args:
+            raw_rows: Lista de listas com os dados brutos da tabela
+            table_name: Nome da tabela para identificação
+            
+        Returns:
+            Tuple[pd.DataFrame, Dict]: 
+                - DataFrame com os dados dos ativos individuais
+                - Dicionário com informações do total
+        """
+        if not raw_rows:
+            return pd.DataFrame(), {}
+        
+        # 1. Encontrar a linha de cabeçalho (procurar por "Ticker", "Qtd", etc.)
+        header_idx = None
+        for i, row in enumerate(raw_rows):
+            row_text = " ".join(str(c).lower() for c in row)
+            if "ticker" in row_text and "qtd" in row_text:
+                header_idx = i
+                break
+        
+        if header_idx is None:
+            return pd.DataFrame(), {}
+        
+        # 2. Extrair cabeçalho e normalizar nomes das colunas
+        header_row = raw_rows[header_idx]
+        
+        # Encontrar onde começam as colunas não vazias no cabeçalho
+        first_nonempty = None
+        for j, cell in enumerate(header_row):
+            if str(cell).strip():
+                first_nonempty = j
+                break
+        
+        if first_nonempty is None:
+            return pd.DataFrame(), {}
+        
+        # Mapear todas as colunas do cabeçalho
+        columns = []
+        col_mapping = {}
+        for j in range(len(header_row)):
+            cell_value = str(header_row[j]).strip()
+            if cell_value:
+                col_name = self._clean_col_name(cell_value)
+                if col_name and col_name != "col":
+                    columns.append(col_name)
+                    col_mapping[j] = len(columns) - 1
+        
+        # 3. Processar linhas de dados
+        data_rows = []
+        total_info = {}
+        
+        for i in range(header_idx + 1, len(raw_rows)):
+            row = raw_rows[i]
+            
+            # Verificar se é linha de total
+            row_text = " ".join(str(c).lower() for c in row)
+            if "total" in row_text:
+                # Extrair informações do total
+                total_info["label"] = next((str(c).strip() for c in row if str(c).strip().lower().startswith("total")), "")
+                
+                # Procurar valores monetários na linha de total
+                for j, cell in enumerate(row):
+                    cell_str = str(cell).strip()
+                    if cell_str and ("$" in cell_str or "R$" in cell_str):
+                        if "valor_investido" not in total_info:
+                            total_info["valor_investido"] = cell_str
+                        else:
+                            total_info["valor_atual"] = cell_str
+                break
+            
+            # Verificar se linha está vazia
+            if self._is_blank_row(row):
+                continue
+            
+            # 4. Extrair dados da linha
+            # Verificar se a linha tem dados (procurar primeira célula não vazia após índice 1)
+            has_data = False
+            for j in range(2, len(row)):
+                if str(row[j]).strip():
+                    has_data = True
+                    break
+            
+            if not has_data:
+                continue
+            
+            # Montar dicionário com os dados - mapear cada coluna do header para o valor da linha
+            row_data = {}
+            for j, col_idx in col_mapping.items():
+                col_name = columns[col_idx]
+                # O nome do ativo está deslocado uma coluna à esquerda (índice 2 quando o header começa em índice 1)
+                # Se esta é a primeira coluna do header (nome_do_fundo, nome_da_empresa, etc.),
+                # pegar o valor da coluna 2 em vez da coluna do header
+                if col_idx == 0 and j == first_nonempty:
+                    # Pegar o nome do ativo da coluna 2
+                    value = str(self._safe_get(row, 2, "")).strip()
+                else:
+                    value = str(self._safe_get(row, j, "")).strip()
+                row_data[col_name] = value
+            
+            data_rows.append(row_data)
+        
+        # 5. Criar DataFrame
+        if not data_rows:
+            df = pd.DataFrame(columns=columns)
+        else:
+            df = pd.DataFrame(data_rows, columns=columns)
+        
+        # 6. Conversões numéricas opcionais
+        for col in df.columns:
+            col_lower = col.lower()
+            if col_lower in ["qtd", "quantidade"]:
+                # Converter quantidade (pode ter vírgula como decimal)
+                df[col + "_num"] = df[col].apply(lambda x: self._convert_money(str(x)) if pd.notna(x) else float("nan"))
+            elif any(k in col_lower for k in ["valor", "preco", "preço", "cota", "resultado"]):
+                # Converter valores monetários
+                df[col + "_num"] = df[col].apply(lambda x: self._convert_money(str(x)) if pd.notna(x) else float("nan"))
+            elif "pct" in col_lower or "carteira" in col_lower or "%" in col:
+                # Converter percentuais
+                df[col + "_pct"] = df[col].apply(lambda x: self._convert_percent(str(x)) if pd.notna(x) else float("nan"))
+        
+        return df, total_info
 
     def parse_all_sheets(self) -> List[pd.DataFrame]:
 
@@ -343,3 +592,94 @@ class AssetAllocationParser:
             df_summary = df_summary.sort_values('__order__').drop(columns='__order__').reset_index(drop=True)
 
         return df_detailed.reset_index(drop=True), df_summary.reset_index(drop=True)
+    
+    # ==================== Métodos de Conversão para Modelos Pydantic ====================
+    
+    def to_general_allocation_model(self, df_detailed: pd.DataFrame, df_summary: pd.DataFrame) -> GeneralAllocation:
+        """Converte DataFrames de alocação geral para modelo Pydantic"""
+        detailed_rows = [
+            GeneralAllocationDetailRow(**row.to_dict()) 
+            for _, row in df_detailed.iterrows()
+        ]
+        summary_rows = [
+            GeneralAllocationSummaryRow(**row.to_dict()) 
+            for _, row in df_summary.iterrows()
+        ]
+        return GeneralAllocation(detailed=detailed_rows, summary=summary_rows)
+    
+    def to_standard_investment_model(self, df: pd.DataFrame, total_info: Dict[str, Any]) -> StandardInvestmentTable:
+        """Converte DataFrame de investimentos padrão para modelo Pydantic"""
+        rows = [
+            StandardInvestmentRow(**row.to_dict()) 
+            for _, row in df.iterrows()
+        ]
+        total = InvestmentTotal(**total_info)
+        return StandardInvestmentTable(rows=rows, total=total)
+    
+    def to_renda_fixa_brasil_model(self, renda_fixa_dict: Dict) -> RendaFixaBrasil:
+        """Converte dicionário de Renda Fixa Brasil para modelo Pydantic"""
+        blocks = {}
+        
+        for key, value in renda_fixa_dict.items():
+            if isinstance(value, dict) and "df" in value:
+                # É um bloco (Curto/Médio/Longo Prazo)
+                rows = [
+                    RendaFixaBrasilRow(**row.to_dict()) 
+                    for _, row in value["df"].iterrows()
+                ]
+                blocks[key] = RendaFixaBrasilBlock(rows=rows, total=value["total"])
+            elif isinstance(value, (int, float)):
+                # É o total geral
+                blocks["total_renda_fixa_br"] = value
+        
+        return RendaFixaBrasil(**blocks)
+    
+    def to_asset_allocation_data(
+        self,
+        general_allocation: Optional[Tuple[pd.DataFrame, pd.DataFrame]] = None,
+        subtables: Optional[Dict[str, Any]] = None
+    ) -> AssetAllocationData:
+        """
+        Converte todos os dados parseados para o modelo completo AssetAllocationData
+        
+        Args:
+            general_allocation: Tupla (df_detailed, df_summary) da alocação geral
+            subtables: Dicionário com todas as sub-tabelas parseadas
+            
+        Returns:
+            AssetAllocationData com todos os dados mapeados
+        """
+        data = {}
+        
+        # Converter alocação geral
+        if general_allocation:
+            df_detailed, df_summary = general_allocation
+            data["general_allocation"] = self.to_general_allocation_model(df_detailed, df_summary)
+        
+        # Converter sub-tabelas
+        if subtables:
+            # Renda Fixa Brasil (estrutura especial)
+            if "Renda Fixa Brasil" in subtables:
+                data["renda_fixa_brasil"] = self.to_renda_fixa_brasil_model(subtables["Renda Fixa Brasil"])
+            
+            # Tabelas padrão de investimentos
+            standard_tables_mapping = {
+                "Renda Fixa EUA": "renda_fixa_eua",
+                "Multimercado": "multimercado",
+                "Commodities": "commodities",
+                "Stocks US": "stocks_us",
+                "World Stocks": "world_stocks",
+                "Acões BR": "acoes_br",
+                "REITs": "reits",
+                "FUNDOS IMOBILIÁRIOS": "fundos_imobiliarios",
+                "Criptos": "criptos"
+            }
+            
+            for table_name, model_key in standard_tables_mapping.items():
+                if table_name in subtables and isinstance(subtables[table_name], dict):
+                    df = subtables[table_name].get("df")
+                    total_info = subtables[table_name].get("total")
+                    if df is not None and not df.empty:
+                        data[model_key] = self.to_standard_investment_model(df, total_info)
+        
+        return AssetAllocationData(**data)
