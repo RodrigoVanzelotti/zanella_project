@@ -1,0 +1,16 @@
+#!/bin/sh
+
+while read oldrev newrev refname; do
+    if git diff --name-only $oldrev $newrev | grep '\.py$' | xargs grep -q 'breakpoint()'; then
+        echo "Push rejected: 'breakpoint()' found in modified Python files."
+        exit 1
+    fi
+
+    if git diff $oldrev $newrev | grep -q '# HARDCODED REMOVE'; then
+        echo "Push rejected: 'HARDCODED REMOVE' marker found in code."
+        exit 1
+    fi
+done
+
+echo "Push allowed."
+exit 0
