@@ -1,0 +1,13 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../:/app:cached
+      - /app/.venv  # Exclude .venv from the host mount to avoid Windows/Linux conflicts
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Use the image's CMD (development: uvicorn --reload). For production use Dockerfile.prod or a separate compose file.
