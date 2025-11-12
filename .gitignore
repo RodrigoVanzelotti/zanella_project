@@ -1,0 +1,11 @@
+__pycache__/
+.venv/
+.env
+*.pyc
+dist/
+build/
+*.egg-info/
+uv.lock
+# Ignore local copies of Google service account files
+config/google_service_account.json
+secrets/
