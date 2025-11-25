@@ -11,4 +11,3 @@ data = google_client.fetch_spreadsheet_rows("Rodrigo Vanzelotti", skip_initial_r
 # asset_allocation_summary = parser._parse_general_allocation(data['Asset Allocation'][:ASSET_ALLOCATION_SUMMARY_ROW])
 al_detail, al_summary = parser.parse_general_allocation(data['Asset Allocation'][:ASSET_ALLOCATION_SUMMARY_ROW])
 subtables = parser.parse_multiple_tables(data['Asset Allocation'])
-breakpoint()
